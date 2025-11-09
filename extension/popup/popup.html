@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="optihire-popup">
+        <div class="popup-header">
+            <div class="popup-logo">
+                <span>⚡</span>
+                <h3>OptiHire</h3>
+            </div>
+        </div>
+        
+        <div class="popup-content">
+            <p class="popup-description">
+                AI-powered job compatibility analysis for LinkedIn
+            </p>
+            
+            <div class="popup-status">
+                <div class="status-item">
+                    <span class="status-label">Profile Status:</span>
+                    <span id="profile-status" class="status-value">Loading...</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Last Updated:</span>
+                    <span id="last-updated" class="status-value">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Backend Status:</span>
+                    <span id="backend-status" class="status-value">Checking...</span>
+                </div>
+            </div>
+            
+            <div class="popup-actions">
+                <button id="open-linkedin" class="popup-btn primary">
+                    Open LinkedIn
+                </button>
+                <button id="refresh-profile" class="popup-btn secondary">
+                    Refresh Profile Data
+                </button>
+                <button id="check-backend" class="popup-btn secondary">
+                    Check Backend
+                </button>
+            </div>
+            
+            <div class="popup-tips">
+                <h4>💡 How to use:</h4>
+                <ul>
+                    <li>Visit your LinkedIn profile first</li>
+                    <li>Accept the consent banner to store your profile</li>
+                    <li>Browse to any job posting on LinkedIn</li>
+                    <li>Click "Match Score" button to analyze compatibility</li>
+                    <li>Use the sidebar chat for follow-up questions</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
