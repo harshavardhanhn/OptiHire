@@ -20,6 +20,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('check-backend').addEventListener('click', async () => {
         await checkBackendHealth();
     });
+
+        // Resume builder button - open resume.html inside extension
+    const resumeBtn = document.getElementById('resumeBuilderBtn');
+    if (resumeBtn) {
+        resumeBtn.addEventListener('click', () => {
+            const localUrl = 'http://127.0.0.1:5500/extension/resume/resume.html';
+            chrome.tabs.create({ url: localUrl });
+            window.close();
+        });
+    }
+
 });
 
 async function loadPopupData() {

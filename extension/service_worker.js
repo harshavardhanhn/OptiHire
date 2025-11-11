@@ -52,6 +52,19 @@ class OptiHireBackground {
           const health = await this.checkBackendHealth();
           sendResponse({ success: true, data: health });
           break;
+
+        case 'OPEN_RESUME_PAGE':
+          try {
+            // allow caller to specify a URL (e.g., local dev server). Otherwise open bundled page.
+            const url = request.url || chrome.runtime.getURL('resume/resume.html');
+            chrome.tabs.create({ url }, (tab) => {
+              sendResponse({ success: true, tabId: tab && tab.id });
+            });
+          } catch (err) {
+            console.error('Background: OPEN_RESUME_PAGE failed', err);
+            sendResponse({ success: false, error: err.message });
+          }
+          break;
         
         default:
           sendResponse({ success: false, error: 'Unknown action' });
