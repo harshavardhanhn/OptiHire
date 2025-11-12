@@ -11,13 +11,18 @@ const q = (s, r = document) => r.querySelector(s);
 const qa = (s, r = document) => Array.from(r.querySelectorAll(s));
 const delay = ms => new Promise(r => setTimeout(r, ms));
 const safeText = el => el ? (el.innerText || '').trim() : '';
+const isOnLinkedInProfile = () => location.hostname.includes('linkedin.com') && /\/in\//.test(location.pathname);
 
 /* ---------------- Profile extraction (wait for lazy load of Skills) ---------------- */
 async function extractProfileFromDOM(waitForSkills = true) {
   try {
-  const name = safeText(q('.pv-text-details__left-panel h1')) || safeText(q('.text-heading-xlarge')) || safeText(q('h1')) || '';
-  const title = safeText(q('.pv-text-details__left-panel .text-body-medium')) || safeText(q('.text-body-medium.break-words')) || safeText(q('.pv-top-card--list li')) || '';
-  const summary = safeText(q('#about .inline-show-more-text')) || safeText(q('#about .pv-shared-text-with-see-more')) || safeText(q('.pv-about__summary-text')) || '';
+    if (!isOnLinkedInProfile()) {
+      throw new Error('Not on a LinkedIn profile page. Navigate to your profile (URL contains /in/).');
+    }
+
+    const name = safeText(q('.pv-text-details__left-panel h1')) || safeText(q('.text-heading-xlarge')) || safeText(q('h1')) || '';
+    const title = safeText(q('.pv-text-details__left-panel .text-body-medium')) || safeText(q('.text-body-medium.break-words')) || safeText(q('.pv-top-card--list li')) || '';
+    const summary = safeText(q('#about .inline-show-more-text')) || safeText(q('#about .pv-shared-text-with-see-more')) || safeText(q('.pv-about__summary-text')) || '';
 
     if (waitForSkills) {
       try {
@@ -33,7 +38,9 @@ async function extractProfileFromDOM(waitForSkills = true) {
       'section.pv-skill-categories-section',
       'section#skills',
       'section.pv-profile-section.skills-section',
-      'section.pv2-profile-section__card'
+      'section.pv2-profile-section__card',
+      'section[id*="skills" i]',
+      'div[data-view-name*="skills" i]'
     ];
     let skillSection = null;
     for (const sel of skillSelectors) {
@@ -41,24 +48,45 @@ async function extractProfileFromDOM(waitForSkills = true) {
       if (skillSection) break;
     }
 
+    // Try to expand skills section (See all skills)
+    try {
+      const expanders = [
+        'a[href*="details/skills"]',
+        'button[aria-label*="skills" i]',
+        'button[aria-label*="all skills" i]',
+        'button[aria-label*="show more skills" i]',
+        'button[aria-expanded="false"][aria-label*="skills" i]'
+      ];
+      for (const sel of expanders) {
+        const btn = q(sel);
+        if (btn) { try { btn.click(); await delay(500); } catch(e){} }
+      }
+    } catch(e){}
+
     if (skillSection) {
-      const skillEls = skillSection.querySelectorAll('span.pv-skill-category-entity__name-text, span.pv-skill-entity__skill-name, [data-test-skill-name], .pv-skill-entity__skill-name');
+      const skillEls = skillSection.querySelectorAll(
+        'span.pv-skill-category-entity__name-text, span.pv-skill-entity__skill-name, [data-test-skill-name], .pv-skill-entity__skill-name, .pvs-list__item span[aria-hidden="true"], .pvs-list__item .artdeco-pill__text, .skill-pill, .skills-list span'
+      );
       skills = Array.from(skillEls).map(el => safeText(el)).filter(Boolean);
     }
 
     if (!skills || skills.length === 0) {
-      const possibleSections = Array.from(document.querySelectorAll('section')).filter(s => /skills/i.test(s.innerText));
-      if (possibleSections.length) {
-        const sec = possibleSections[0];
-        const candidates = sec.querySelectorAll('span, li, button');
-        skills = Array.from(candidates).map(n => safeText(n)).filter(t => t && t.length < 40);
+      // Broader containers for the new LinkedIn UI
+      const containers = qa('section#skills, section[id*="skills"], section.pv-skill-categories-section, section[data-view-name*="skills"], div.pv-skill-categories-section');
+      for (const c of containers) {
+        const els = c.querySelectorAll('.pvs-list__item span[aria-hidden="true"], span.pv-skill-entity__skill-name, [data-test-skill-name]');
+        const found = Array.from(els).map(el => safeText(el)).filter(Boolean);
+        if (found.length) { skills = skills.concat(found) }
       }
     }
 
     if (!skills || skills.length === 0) {
-      const bodyText = (document.body.innerText || '').slice(0, 60000);
-      const tokens = Array.from(new Set((bodyText.match(/\b[A-Z][A-Za-z0-9\+\-\.]{1,30}\b/g) || []))).slice(0, 120);
-      skills = tokens.filter(t => t.length <= 30).slice(0, 60);
+      const possibleSections = Array.from(document.querySelectorAll('section')).filter(s => /\bskills\b/i.test(s.innerText));
+      if (possibleSections.length) {
+        const sec = possibleSections[0];
+        const candidates = sec.querySelectorAll('.pvs-list__item span[aria-hidden="true"], span, li');
+        skills = Array.from(candidates).map(n => safeText(n)).filter(t => t && t.length < 60);
+      }
     }
 
     const expEls = qa('#experience-section h3, .pvs-entity__path-node span[aria-hidden="true"], .pv-entity__summary-info h3');
@@ -67,7 +95,7 @@ async function extractProfileFromDOM(waitForSkills = true) {
     const certEls = qa('.certification-name, section.certifications-section span[aria-hidden="true"]');
     const certifications = Array.from(certEls).map(n => safeText(n)).filter(Boolean);
 
-    const dedupSkills = Array.from(new Set(skills)).slice(0, 60);
+    const dedupSkills = Array.from(new Set(skills.map(s => s.replace(/\([^)]*\)/g, '').trim()))).slice(0, 60);
 
     const profileData = {
       name,
@@ -83,54 +111,104 @@ async function extractProfileFromDOM(waitForSkills = true) {
     return profileData;
   } catch (err) {
     console.warn('OptiHire: extractProfileFromDOM error', err);
-    return { name:'', summary:'', skills:[], experiences:[], certifications:[], extracted_at: new Date().toISOString() };
+    throw err;
   }
 }
 
 /* ---------------- Job extraction ---------------- */
 async function extractJobFromDOM() {
   try {
-    const showMoreSelectors = ['.show-more-less-html__button', 'button[aria-expanded][aria-label*="more"]'];
+    // Expand job description if collapsed
+    const showMoreSelectors = [
+      '.show-more-less-html__button',
+      'button[aria-expanded][aria-label*="more"]',
+      '.jobs-description__container button',
+      'button[aria-label*="See more" i]'
+    ];
     for (const sel of showMoreSelectors) {
-      const btn = document.querySelector(sel);
-      if (btn && /(show more|see more|more)/i.test(btn.innerText)) {
-        try { btn.click(); await delay(400); } catch(e){}
+      const btns = qa(sel);
+      for (const btn of btns) {
+        if (/see more|show more|more/i.test(btn.innerText || btn.getAttribute('aria-label') || '')) {
+          try { btn.click(); await delay(200); } catch(e){}
+        }
       }
     }
 
-    const jobTitle = safeText(q('.topcard__title, .jobs-unified-top-card__job-title, h1')) || '';
-    const company = safeText(q('.topcard__org-name-link, .jobs-unified-top-card__company-name, .topcard__org-name')) || '';
-    let jobDesc = safeText(q('.show-more-less-html__markup')) || safeText(q('.jobs-description-content__text')) || safeText(q('[data-job-details]')) || '';
+    const jobTitle = safeText(q('.topcard__title, .jobs-unified-top-card__job-title, h1, [data-test-job-title]')) || '';
+    const company = safeText(q('.topcard__org-name-link, .jobs-unified-top-card__company-name, .topcard__org-name, [data-test-company-name]')) || '';
 
-    if (!jobDesc || jobDesc.length < 30) {
-      const alt = safeText(q('.description__text, .job-description__content, .jobs-description__snippet'));
-      if (alt && alt.length > jobDesc.length) jobDesc = alt;
+    // Helper: find a description element within known job description containers only
+    const containerSelectors = [
+      '.jobs-description__container',
+      'section.jobs-description__container',
+      '[data-job-details]',
+      '.jobs-details__main-content',
+      '.jobs-unified-description',
+      '.jobs-box__html-content',
+      '.jobs-description-content',
+      '[data-test-description-section]'
+    ];
+    let container = null;
+    for (const cSel of containerSelectors) {
+      const c = q(cSel);
+      if (c) { container = c; break; }
     }
 
-    if ((!jobDesc || jobDesc.length < 40)) {
+    // Prefer description nodes inside the container
+    let descEl = null;
+    if (container) {
+      descEl = container.querySelector(
+        '.show-more-less-html__markup, [data-test-description], .jobs-description-content__text, [data-job-details], .jobs-box__html-content, .jobs-description__content'
+      );
+    }
+
+    // If still not found, allow a top-level candidate but only if it lives under a known container
+    if (!descEl) {
+      const candidates = qa('.show-more-less-html__markup, .jobs-description-content__text, [data-test-description], .jobs-box__html-content');
+      for (const el of candidates) {
+        const p = el.closest(containerSelectors.join(','));
+        if (p) { descEl = el; container = p; break; }
+      }
+    }
+
+    let jobDesc = '';
+    if (descEl) {
+      jobDesc = safeText(descEl);
+    } else if (container) {
+      // As a last resort, collect only text within the container (no cross-page fallback)
+      const parts = [];
+      const nodes = container.querySelectorAll('p, li, div');
+      for (const n of nodes) {
+        const t = safeText(n);
+        if (t && t.length > 0) parts.push(t);
+      }
+      jobDesc = parts.join(' ');
+    }
+
+    // Fallback: JSON-LD JobPosting description (strip HTML)
+    if (!jobDesc || jobDesc.length < 40) {
       try {
         const scripts = qa('script[type="application/ld+json"]');
         for (const s of scripts) {
           try {
             const j = JSON.parse(s.textContent || '{}');
-            if (j && j['@type'] && /JobPosting/i.test(j['@type'])) {
-              const d = j.description || j.jobDescription || j['description'];
-              if (d && d.length > jobDesc.length) { jobDesc = d; break }
+            const isJobPosting = j && (j['@type'] === 'JobPosting' || (Array.isArray(j['@type']) && j['@type'].includes('JobPosting')));
+            if (isJobPosting) {
+              const raw = j.description || j.jobDescription || '';
+              const clean = (raw || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              if (clean && clean.length > jobDesc.length) { jobDesc = clean; break; }
             }
-          } catch (e) { /* ignore JSON parse errors */ }
+          } catch (e) { /* ignore */ }
         }
-      } catch (e) {}
+      } catch (e) { /* ignore */ }
     }
 
-    if ((!jobDesc || jobDesc.length < 30)) {
-      const rightPane = q('.jobs-details__main-content, .jobs-unified-top-card, .jobs-search__right-rail, .jobs-details') || document.body;
-      const candidates = rightPane.querySelectorAll('p, div, span');
-      let longest = '';
-      for (const c of candidates) {
-        const t = safeText(c);
-        if (t && t.length > longest.length) longest = t;
-      }
-      if (longest && longest.length > jobDesc.length) jobDesc = longest;
+    // Final cleanup
+    jobDesc = (jobDesc || '').replace(/\s+/g, ' ').trim();
+
+    // Enforce a minimum size to avoid empty payload to backend
+    if (jobDesc.length < 20) {
+      console.warn('OptiHire: Job description too short after extraction');
     }
 
     console.log('OptiHire: extracted job ->', { jobTitle, company, jobDescSnippet: (jobDesc||'').slice(0,300)+'...' });
@@ -222,6 +300,14 @@ function createSidebar() {
         return;
       }
 
+      // Guard: ensure profile includes skills; otherwise matching will inevitably show none
+      const skillCount = Array.isArray(profile.skills) ? profile.skills.filter(s => s && String(s).trim().length > 0).length : 0;
+      if (skillCount < 3) {
+        appendMsg('bot', `Profile has only ${skillCount} skills detected. Open your LinkedIn profile and click "Extract Profile" after expanding "See all skills".`);
+        btn.disabled = false;
+        return;
+      }
+
       appendMsg('bot', 'Calling match service...');
       const swResponse = await new Promise((resolve, reject) => {
         chrome.runtime.sendMessage(
@@ -239,6 +325,9 @@ function createSidebar() {
       const data = swResponse.data || {};
       renderResultSection(data);
       appendMsg('bot', `Match complete — Score: ${Math.round(data.score||0)}%`);
+      if (data.analysis_source === 'local') {
+        appendMsg('bot', 'Backend not reachable — used local analysis. Start backend for best accuracy.');
+      }
     } catch (err) {
       console.error('Match job error', err);
       appendMsg('bot', 'Match error: ' + (err.message || err));
@@ -353,7 +442,10 @@ function renderResultSection(result) {
   const sec = document.getElementById('optiResultSection'); 
   if (!sec) return;
   const score = Math.round(result.score||result.matchScore||0);
-  const matched = (result.matched_skills||result.matchedSkills||[]).slice(0,20).join(', ') || 'None';
+  const exact = (result.matched_skills||result.matchedSkills||[]);
+  const partial = (result.partial_matches||result.partialMatches||[]);
+  const combined = Array.from(new Set([...(exact||[]), ...(partial||[])]));
+  const matched = combined.slice(0,20).join(', ') || 'None';
   const missing = (result.missing_skills||result.missingSkills||[]).slice(0,20).join(', ') || 'None';
   const suggestions = (result.suggestions||[]);
   sec.innerHTML = `<div class="section-header">
@@ -453,7 +545,8 @@ function showDetailedResult(result, job) {
     });
   } catch (e) { console.warn('OptiHire: render sections failed', e) }
 
-  const msg = `Job: ${job.jobTitle || 'Job'}\nCompany: ${job.company || ''}\nScore: ${Math.round(normalized.score)}%\nMatched: ${(normalized.matched_skills||[]).join(', ') || 'None'}\nMissing: ${(normalized.missing_skills||[]).join(', ') || 'None'}`;
+  const combined = Array.from(new Set([...(normalized.matched_skills||[]), ...(normalized.partial_matches||[])]));
+  const msg = `Job: ${job.jobTitle || 'Job'}\nCompany: ${job.company || ''}\nScore: ${Math.round(normalized.score)}%\nMatched: ${combined.join(', ') || 'None'}\nMissing: ${(normalized.missing_skills||[]).join(', ') || 'None'}`;
   appendMsg('bot', msg);
   
   try {
@@ -604,4 +697,23 @@ mo.observe(document, { childList:true, subtree:true });
 
 showConsentOnProfile();
 createToggleButton();
+
+// Handle popup-triggered extraction explicitly
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request && request.action === 'EXTRACT_PROFILE') {
+    (async () => {
+      try {
+        const prof = await extractProfileFromDOM(true);
+        await new Promise(r => chrome.storage.local.set({ opti_profile: prof }, r));
+        appendMsg('bot', `Profile saved: ${prof.name || 'Unnamed'} (${(prof.skills||[]).length} skills).`);
+        sendResponse({ success: true });
+      } catch (e) {
+        appendMsg('bot', (e && e.message) ? e.message : 'Failed to extract profile.');
+        sendResponse({ success: false, error: e?.message || String(e) });
+      }
+    })();
+    return true; // keep channel open for async
+  }
+});
+
 console.log('OptiHire content_script initialized');

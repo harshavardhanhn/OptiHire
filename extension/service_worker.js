@@ -52,19 +52,6 @@ class OptiHireBackground {
           const health = await this.checkBackendHealth();
           sendResponse({ success: true, data: health });
           break;
-
-        case 'OPEN_RESUME_PAGE':
-          try {
-            // allow caller to specify a URL (e.g., local dev server). Otherwise open bundled page.
-            const url = request.url || chrome.runtime.getURL('resume/resume.html');
-            chrome.tabs.create({ url }, (tab) => {
-              sendResponse({ success: true, tabId: tab && tab.id });
-            });
-          } catch (err) {
-            console.error('Background: OPEN_RESUME_PAGE failed', err);
-            sendResponse({ success: false, error: err.message });
-          }
-          break;
         
         default:
           sendResponse({ success: false, error: 'Unknown action' });
@@ -77,12 +64,34 @@ class OptiHireBackground {
 
   async analyzeWithBackend({ profile, jobDescription, jobTitle, company }) {
     try {
+      const prepared = this.prepareProfileForBackend(profile);
       const backendResult = await this.callBackendAPI('/api/match', {
-        profile: this.prepareProfileForBackend(profile),
+        profile: prepared,
         job_text: jobDescription
       });
 
-      return backendResult;
+      // If backend returned no matched skills, enrich using local detection
+      const backendMatched = (backendResult?.matched_skills?.length || 0) + (backendResult?.partial_matches?.length || 0);
+      if (backendMatched === 0) {
+        const local = await this.localCompatibilityAnalysis(profile, jobDescription, jobTitle, company);
+        const total = Math.max(local.total_skills || 0, 1);
+        const skillsScore = Math.round(((local.matched_skills.length + local.partial_matches.length) / total) * 100);
+        return {
+          ...backendResult,
+          matched_skills: local.matched_skills,
+          partial_matches: local.partial_matches,
+          missing_skills: local.missing_skills,
+          matched_count: local.matched_count,
+          total_skills: local.total_skills,
+          score: skillsScore,
+          analysis_source: 'backend+local'
+        };
+      }
+
+      // Ensure skills-only score consistency when backend provides totals
+      const total = backendResult?.total_skills ?? ((backendResult?.matched_skills?.length || 0) + (backendResult?.missing_skills?.length || 0));
+      const skillsScore = total > 0 ? Math.round(((backendResult?.matched_skills?.length || 0) / total) * 100) : (backendResult?.score || 0);
+      return { ...backendResult, score: skillsScore, analysis_source: 'backend' };
     } catch (error) {
       console.error('Backend analysis error:', error);
       return await this.localCompatibilityAnalysis(profile, jobDescription, jobTitle, company);
@@ -122,15 +131,62 @@ class OptiHireBackground {
   }
 
   prepareProfileForBackend(profile) {
-    return {
-      name: profile.name,
-      headline: profile.headline,
-      about: profile.about,
-      skills: profile.skills || [],
-      experience: profile.experience || [],
-      education: profile.education || [],
-      location: profile.location
-    };
+    try {
+      if (!profile || typeof profile !== 'object') {
+        return { name: '', headline: '', about: '', skills: [], experience: [], education: [], location: '' };
+      }
+
+      const headline = profile.title || profile.headline || '';
+      const about = profile.summary || profile.about || '';
+      const skills = Array.isArray(profile.skills) ? profile.skills : [];
+      // Canonicalize common synonyms so server-side matching is consistent
+      const syn = new Map([
+        ['c++','c++'], ['cpp','c++'], ['c#','c#'], ['csharp','c#'], ['node.js','node.js'], ['nodejs','node.js'],
+        ['react.js','react'], ['reactjs','react'], ['express.js','express'], ['expressjs','express'],
+        ['google cloud','gcp'], ['gcp','gcp'], ['machine learning','machine learning'], ['ml','machine learning'],
+        ['natural language processing','nlp'], ['nlp','nlp'], ['js','javascript'], ['ecmascript','javascript'], ['es6','javascript'],
+        ['css3','css'], ['html5','html']
+      ]);
+      const canonSkills = skills.map(s => {
+        const t = (s||'').toLowerCase().replace(/\([^)]*\)/g, '').trim();
+        // Prefer canonical synonym, else use normalized lowercase token
+        // Also collapse common variants
+        const mapped = syn.get(t);
+        return mapped ? mapped : t;
+      }).filter(Boolean);
+
+      const expRaw = Array.isArray(profile.experiences)
+        ? profile.experiences
+        : (Array.isArray(profile.experience) ? profile.experience : []);
+
+      const experience = expRaw.map((e) => {
+        if (typeof e === 'string') return { title: e, description: '' };
+        if (e && typeof e === 'object') {
+          return {
+            title: e.title || e.role || '',
+            description: e.description || e.summary || '',
+            years: e.years || e.duration || 0
+          };
+        }
+        return { title: String(e || ''), description: '' };
+      });
+
+      const education = Array.isArray(profile.education) ? profile.education : [];
+      const location = profile.location || '';
+
+      return {
+        name: profile.name || '',
+        headline,
+        about,
+        skills: canonSkills,
+        experience,
+        education,
+        location
+      };
+    } catch (e) {
+      console.warn('prepareProfileForBackend failed, using minimal profile', e);
+      return { name: profile?.name || '', headline: profile?.title || '', about: profile?.summary || '', skills: profile?.skills || [], experience: [], education: [], location: '' };
+    }
   }
 
   async checkBackendHealth() {
@@ -150,34 +206,74 @@ class OptiHireBackground {
   }
 
   async localCompatibilityAnalysis(profile, jobDescription, jobTitle, company) {
-    const profileSkills = profile.skills || [];
-    const jobText = jobDescription.toLowerCase();
-    
-    const commonSkills = [
-      'javascript', 'python', 'java', 'react', 'node.js', 'aws', 'sql', 'mongodb',
-      'docker', 'kubernetes', 'machine learning', 'ai', 'typescript', 'angular',
-      'vue', 'php', 'c#', 'c++', 'ruby', 'go', 'rust', 'swift', 'kotlin',
-      'html', 'css', 'express', 'django', 'flask', 'mysql', 'postgresql', 'redis'
+    const norm = (s) => (s || '').toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, '');
+    const synonyms = new Map([
+      ['c++','cpp'], ['c#','csharp'], ['node.js','nodejs'], ['react.js','reactjs'], ['express.js','expressjs'],
+      ['google cloud','gcp'], ['machine learning','machinelearning'], ['natural language processing','nlp'],
+      ['js','javascript'], ['cascading style sheets','css'], ['css3','css'], ['html5','html'], ['ecmascript','javascript'], ['es6','javascript'], ['github','git']
+    ]);
+    const normalize = (s) => synonyms.get((s||'').toLowerCase()) || (s||'').toLowerCase();
+
+    // Normalize profile skills and keep a set for matching
+    const profileSkillsNorm = new Set((profile?.skills || []).map(s => norm(normalize(s))).filter(Boolean));
+    const jobTextRaw = jobDescription || '';
+    const jobText = jobTextRaw.toLowerCase();
+
+    // Canonical skill list similar to ML service
+    const skillsDb = [
+      'python','javascript','js','java','c++','cpp','c#','csharp','ruby','go','golang','rust','swift','kotlin',
+      'html','html5','css','css3','react','react.js','reactjs','angular','vue','node.js','nodejs','express','express.js','expressjs','django','flask','next.js','nextjs','graphql',
+      'sql','mysql','postgresql','postgres','mongodb','redis','oracle',
+      'aws','azure','gcp','google cloud','docker','kubernetes','terraform',
+      'pandas','numpy','scikit-learn','sklearn','tensorflow','pytorch','machine learning','ml','natural language processing','nlp',
+      'jenkins','git','ci/cd','ansible','prometheus','grafana'
     ];
-    
-    const matchedSkills = commonSkills.filter(skill => 
-      jobText.includes(skill) && profileSkills.some(profileSkill => 
-        profileSkill.toLowerCase().includes(skill) || skill.includes(profileSkill.toLowerCase())
-      )
-    );
-    
-    const missingSkills = commonSkills.filter(skill => 
-      jobText.includes(skill) && !profileSkills.some(profileSkill => 
-        profileSkill.toLowerCase().includes(skill) || skill.includes(profileSkill.toLowerCase())
-      )
-    );
-    
-    const score = Math.min(Math.round((matchedSkills.length / Math.max(commonSkills.filter(s => jobText.includes(s)).length, 1)) * 100), 100);
-    
+
+    // Extract job skills using regex on both raw and normalized forms
+    const present = [];
+    const seen = new Set();
+    const jobNorm = norm(jobTextRaw);
+    for (const canon of skillsDb) {
+      if (seen.has(canon)) continue;
+      const re = new RegExp(`(^|[^a-z0-9])${canon.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}([^a-z0-9]|$)`, 'i');
+      const canonNorm = norm(normalize(canon));
+      if (re.test(jobText) || (canonNorm && jobNorm.includes(canonNorm))) {
+        present.push(canon);
+        seen.add(canon);
+      }
+      if (present.length >= 10) break; // cap to avoid dilution
+    }
+
+    // Compute exact and partial matches
+    const exactMatches = [];
+    const partialMatches = [];
+    const presentNorm = present.map(s => norm(normalize(s)));
+    for (let i = 0; i < present.length; i++) {
+      const canon = present[i];
+      const n = presentNorm[i];
+      if (!n) continue;
+      if (profileSkillsNorm.has(n)) {
+        exactMatches.push(canon);
+      } else {
+        // partial: substring containment on normalized forms
+        const hasPartial = Array.from(profileSkillsNorm).some(p => p.includes(n) || n.includes(p));
+        if (hasPartial) partialMatches.push(canon);
+      }
+    }
+
+    const allMatchesSet = new Set([...exactMatches, ...partialMatches]);
+    const missingSkills = present.filter(canon => !allMatchesSet.has(canon));
+
+    const denom = Math.max(present.length, 1);
+    const score = Math.round(((exactMatches.length + partialMatches.length) / denom) * 100);
+
     return {
-      score: score,
-      matched_skills: matchedSkills,
+      score,
+      matched_skills: exactMatches,
+      partial_matches: partialMatches,
       missing_skills: missingSkills,
+      matched_count: allMatchesSet.size,
+      total_skills: present.length,
       suggestions: [
         'Add missing technical skills to your profile',
         'Highlight relevant experience in your summary',

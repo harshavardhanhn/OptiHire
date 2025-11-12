@@ -86,16 +86,21 @@ router.post("/match", async (req, res) => {
   // If the ML service returns a packaged analysis (Flask: { success: True, analysis: {...} })
   let analysis = ml.analysis || ml
 
-  const score = analysis.overall_score ?? analysis.matchScore ?? analysis.score ?? 0
-  const matched_skills = analysis.matched_skills ?? analysis.matchedSkills ?? analysis.matchedSkills ?? []
+  // Skills-only scoring: percentage of job-required skills detected as matched
+  const exact_matches = analysis.matched_skills ?? analysis.matchedSkills ?? []
+  const partial_matches = analysis.partial_matches ?? analysis.partialMatches ?? []
+  const matched_skills = Array.from(new Set([...(exact_matches || []), ...(partial_matches || [])]))
   const missing_skills = analysis.missing_skills ?? analysis.missingSkills ?? []
+  const total_skills = analysis.total_required ?? analysis.total_skills ?? (matched_skills.length + missing_skills.length)
+  const skills_score = total_skills > 0 ? Math.round((matched_skills.length / total_skills) * 100) : 0
+  const score = skills_score
   const suggestions = analysis.suggestions ?? ml.suggestions ?? ml.suggestions ?? []
   const matched_count = analysis.matched_count ?? matched_skills.length
-  const total_skills = analysis.total_required ?? analysis.total_skills ?? (matched_skills.length + missing_skills.length)
 
     const result = {
       score,
       matched_skills,
+      partial_matches,
       missing_skills,
       suggestions,
       matched_count,

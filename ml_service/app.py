@@ -29,46 +29,90 @@ class JobCompatibilityAnalyzer:
             ngram_range=(1, 2)
         )
         
-        # Common skills database
+        # Common skills database (includes common variants)
         self.skills_db = {
-            'programming': ['python', 'javascript', 'java', 'c++', 'c#', 'ruby', 'go', 'rust', 'swift', 'kotlin'],
-            'web': ['html', 'css', 'react', 'angular', 'vue', 'node.js', 'express', 'django', 'flask'],
-            'databases': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle'],
-            'cloud': ['aws', 'azure', 'gcp', 'docker', 'kubernetes', 'terraform'],
-            'data_science': ['pandas', 'numpy', 'scikit-learn', 'tensorflow', 'pytorch', 'machine learning'],
+            'programming': ['python', 'javascript', 'js', 'java', 'c++', 'cpp', 'c#', 'csharp', 'ruby', 'go', 'golang', 'rust', 'swift', 'kotlin'],
+            'web': ['html', 'html5', 'css', 'css3', 'cascading style sheets', 'react', 'react.js', 'reactjs', 'angular', 'vue', 'node.js', 'nodejs', 'express', 'express.js', 'expressjs', 'django', 'flask', 'next.js', 'nextjs', 'graphql'],
+            'databases': ['sql', 'mysql', 'postgresql', 'postgres', 'mongodb', 'redis', 'oracle'],
+            'cloud': ['aws', 'azure', 'gcp', 'google cloud', 'docker', 'kubernetes', 'terraform'],
+            'data_science': ['pandas', 'numpy', 'scikit-learn', 'sklearn', 'tensorflow', 'pytorch', 'machine learning', 'ml', 'natural language processing', 'nlp'],
             'devops': ['jenkins', 'git', 'ci/cd', 'ansible', 'prometheus', 'grafana']
         }
+        
+        # Synonym normalization map for robust matching
+        self.normalize_map = {
+            'c++': 'cpp', 'c#': 'csharp', 'node.js': 'nodejs', 'react.js': 'reactjs', 'express.js': 'expressjs',
+            'machine learning': 'machinelearning', 'natural language processing': 'nlp', 'google cloud': 'gcp',
+            'javascript': 'javascript', 'js': 'javascript', 'cascading style sheets': 'css',
+            'css3': 'css', 'html5': 'html', 'ecmascript': 'javascript', 'es6': 'javascript', 'github': 'git'
+        }
+    
+    def normalize_skill(self, s: str) -> str:
+        s = (s or '').strip().lower()
+        # Strip parentheses content like "Python (Programming Language)"
+        s = re.sub(r"\([^)]*\)", "", s)
+        # Apply synonym replacements first
+        s = self.normalize_map.get(s, s)
+        # Remove non-alphanumeric (keep letters and numbers)
+        base = re.sub(r'[^a-z0-9]+', '', s)
+        # Collapse common suffixes that aren't part of the tech name
+        base = re.sub(r'(programminglanguage|developer|engineer|programmer)$', '', base)
+        # Handle special known forms
+        if base == 'c':
+            return 'c'
+        return base
+    
+    def normalize_text(self, t: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '', (t or '').lower())
     
     def extract_skills_from_text(self, text: str) -> List[str]:
-        """Extract skills from text using multiple methods"""
-        skills_found = []
-        text_lower = text.lower()
+        """Extract skills from text using multiple methods (normalized matching, canonical outputs)"""
+        skills_found: List[str] = []
+        text_lower = (text or '').lower()
+        text_norm = self.normalize_text(text)
         
-        # Method 1: Direct keyword matching
+        # Method 1: Keyword matching (canonical names), but check both raw and normalized
         for category, skills in self.skills_db.items():
-            for skill in skills:
-                if skill in text_lower:
-                    skills_found.append(skill)
+            for canon in skills:
+                if canon in text_lower:
+                    skills_found.append(canon)
+                    continue
+                norm = self.normalize_skill(canon)
+                if norm and norm in text_norm:
+                    skills_found.append(canon)
         
-        # Method 2: Pattern matching for experience levels
-        experience_patterns = {
-            r'(\d+)\+?\s*years?.*?(python|java|javascript)': 'expert',
-            r'(proficient|experienced).*?(python|java|javascript)': 'experienced',
-            r'(familiar|basic).*?(python|java|javascript)': 'beginner'
-        }
+        # Method 2: Pattern matching for experience levels (kept for future use)
+        # Retain but do not add categories as skills directly
+        # experience_patterns = {
+        #     r'(\d+)\+?\s*years?.*?(python|java|javascript)': 'expert',
+        # }
         
-        # Method 3: Use spaCy for entity recognition if available
+        # Method 3: spaCy entities -> check against known technologies canonically
         if self.nlp:
-            doc = self.nlp(text)
-            for ent in doc.ents:
-                if ent.label_ in ["ORG", "PRODUCT"]:
-                    # Check if it's a known technology
-                    ent_text = ent.text.lower()
-                    for skills in self.skills_db.values():
-                        if any(skill in ent_text for skill in skills):
-                            skills_found.append(ent_text)
+            try:
+                doc = self.nlp(text)
+                for ent in doc.ents:
+                    if ent.label_ in ["ORG", "PRODUCT"]:
+                        ent_text = ent.text.lower()
+                        ent_norm = self.normalize_text(ent_text)
+                        for skills in self.skills_db.values():
+                            for canon in skills:
+                                if ent_text.find(canon) != -1:
+                                    skills_found.append(canon)
+                                else:
+                                    if self.normalize_skill(canon) in ent_norm:
+                                        skills_found.append(canon)
+            except Exception:
+                pass
         
-        return list(set(skills_found))
+        # Unique while preserving canonical names
+        unique = []
+        seen = set()
+        for s in skills_found:
+            if s not in seen:
+                unique.append(s)
+                seen.add(s)
+        return unique
     
     def calculate_semantic_similarity(self, profile_text: str, job_description: str) -> float:
         """Calculate semantic similarity using TF-IDF and cosine similarity"""
@@ -119,28 +163,52 @@ class JobCompatibilityAnalyzer:
         }
     
     def analyze_skills_compatibility(self, profile_skills: List[str], job_description: str) -> Dict:
-        """Analyze skills compatibility with advanced matching"""
-        job_skills = self.extract_skills_from_text(job_description)
-        profile_skills_lower = [skill.lower() for skill in profile_skills]
+        """Analyze skills compatibility with robust normalization and partial matching"""
+        job_skills_all = self.extract_skills_from_text(job_description)  # canonical names (may include aliases like 'js')
+        # Deduplicate while preserving order
+        seen = set()
+        job_skills_canon = []
+        for s in job_skills_all:
+            if s not in seen:
+                seen.add(s)
+                job_skills_canon.append(s)
+        # Consider at most top 10 skills to avoid diluting the score
+        job_skills_core = job_skills_canon[:10]
+        job_skills_norm = [self.normalize_skill(s) for s in job_skills_core]
         
-        # Exact matches
-        exact_matches = [skill for skill in job_skills if skill in profile_skills_lower]
+        # Normalize profile skills and keep mapping to original for display
+        profile_norm_map = {}
+        for ps in profile_skills or []:
+            key = self.normalize_skill(ps)
+            if key:
+                profile_norm_map.setdefault(key, []).append(ps)
+        profile_norm_keys = set(profile_norm_map.keys())
         
-        # Partial matches (substring matches)
+        # Exact matches by normalized form
+        exact_matches = []  # canonical job skills
+        for canon, jn in zip(job_skills_core, job_skills_norm):
+            if jn and jn in profile_norm_keys:
+                exact_matches.append(canon)
+        
+        # Partial matches: substring of normalized forms
         partial_matches = []
-        for job_skill in job_skills:
-            if job_skill not in exact_matches:
-                for profile_skill in profile_skills_lower:
-                    if job_skill in profile_skill or profile_skill in job_skill:
-                        partial_matches.append(job_skill)
-                        break
+        for canon, jn in zip(job_skills_core, job_skills_norm):
+            if canon in exact_matches:
+                continue
+            if not jn:
+                continue
+            for pk in profile_norm_keys:
+                if jn in pk or pk in jn:
+                    partial_matches.append(canon)
+                    break
         
-        all_matches = exact_matches + partial_matches
-        missing_skills = [skill for skill in job_skills if skill not in all_matches]
+        all_matches = list(dict.fromkeys(exact_matches + partial_matches))
+        missing_skills = [canon for canon in job_skills_core if canon not in all_matches]
         
-        # Calculate score (exact matches weighted higher)
-        exact_score = (len(exact_matches) / len(job_skills)) * 70 if job_skills else 0
-        partial_score = (len(partial_matches) / len(job_skills)) * 30 if job_skills else 0
+        # Score: exact weighted higher
+        denom = max(len(job_skills_core), 1)
+        exact_score = (len(exact_matches) / denom) * 70
+        partial_score = (len(partial_matches) / denom) * 30
         total_score = min(exact_score + partial_score, 100)
         
         return {
@@ -148,8 +216,9 @@ class JobCompatibilityAnalyzer:
             'exact_matches': exact_matches,
             'partial_matches': partial_matches,
             'missing_skills': missing_skills,
-            'total_required': len(job_skills),
-            'matched_count': len(all_matches)
+            'total_required': len(job_skills_core),
+            'matched_count': len(all_matches),
+            'job_skills': job_skills_core
         }
     
     def generate_improvement_suggestions(self, analysis: Dict) -> List[str]:
